@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panel-imputer"
+dependencies = ["scikit-learn>=1.2", "pandas>=2.0", "numpy>=1.24", "joblib>=0.10", "tqdm>=4.65"]
+version = "0.7.0"
+authors = [
+  {name="DaMitti", email="da.mitti@posteo.de"}
+]
+description = "A small sklearn compatible imputer for panel data."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/ccew-unibw/panel-imputer"
+Issues = "https://github.com/ccew-unibw/panel-imputer/issues"
+
