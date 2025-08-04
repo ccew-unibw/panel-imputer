@@ -49,8 +49,9 @@ missing_values: float|int default=np.nan
 all_nan_policy: str, default='drop', possible values: ['drop', 'error']
     Whether to drop columns with all-nan values and proceed with imputation or raise an error instead.
 
-parallelize: bool, default=True
-    Whether to use parallelization with joblib Parallel.
+parallelize: bool, default=False
+    Whether to use parallelization with joblib Parallel. Creates chunks based on the location
+    index. Whether or not parallelization speeds up things may depend on the input data structure.
 
 parallel_kwargs: dict, default=None
     Dictionary with kwargs to be passed to joblib Parallel.
@@ -65,6 +66,7 @@ transform(self, X, y=None): Imputes missing values based on the configuration in
     Returns: imputed pd.DataFrame
 fit_transform(self, X, y=None): Inherited combination of fit and transform in one step.
 ```
+
 ## Example use:
 
 ```
@@ -74,7 +76,7 @@ from panel_imputer import PanelImputer
 df = read_some_panel_data_with_missing_values()
 
 imp = PanelImputer(
-    location_index='location',
+    location_index='country',
     time_index=['year', 'month'],
     imputation_method='bfill'
 )
@@ -92,3 +94,16 @@ pipe.fit(X, y)
 ```    
 
 For more examples, see the jupyter notebook.
+
+
+## Changelog:
+
+### 0.7.1
+
+- Parallelization performance improved massively for certain use cases.
+- Parallelization turned off by default.
+- If `parallelize` parameter is True and no `parallel_kwargs` are specified by the user, PanelImputer now uses `Parallel(n_jobs = -2)` by default.
+
+### 0.7.0
+
+Initial release via CCEW.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "panel-imputer"
 dependencies = ["scikit-learn>=1.2", "pandas>=2.0", "numpy>=1.24", "joblib>=1.1.1", "tqdm>=4.65"]
-version = "0.7.0"
+version = "0.7.1"
 authors = [
   {name="DaMitti", email="da.mitti@posteo.de"}
 ]

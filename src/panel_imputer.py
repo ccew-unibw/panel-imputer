@@ -1,3 +1,4 @@
+import multiprocessing
 from typing import Literal, List
 from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -25,7 +26,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         tail_behavior: str | List[str] = None,
         missing_values: float | int = np.nan,
         all_nan_policy: Literal["drop", "error"] = "drop",
-        parallelize: bool = True,
+        parallelize: bool = False,
         parallel_kwargs: dict = None,
     ):
         """
@@ -70,11 +71,13 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             all_nan_policy: str, default='drop', possible values: ['drop', 'error']
                 Whether to drop columns with all-nan values and proceed with imputation or raise an error instead.
 
-            parallelize: bool, default=True
-                Whether to use parallelization with joblib Parallel.
+            parallelize: bool, default=False
+                Whether to use parallelization with joblib Parallel. Creates chunks based on the location
+                index. Whether or not parallelization speeds up things may depend on the input data structure.
 
             parallel_kwargs: dict, default=None
-                Dictionary with kwargs to be passed to joblib Parallel.
+                Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and 
+                parallel_kwargs is None, set to `{"n_jobs": -2}`.
         """
         self.location_index = location_index
         self.time_index = time_index
@@ -84,8 +87,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         self.tail_behavior = tail_behavior
         self.all_nan_policy = all_nan_policy
         self.parallelize = parallelize
-        if parallel_kwargs is None:
-            parallel_kwargs = {}
+        if parallel_kwargs is None and parallelize:
+            parallel_kwargs = {"n_jobs": -2}
         self.parallel_kwargs = parallel_kwargs
 
     def _validate_input(self, X, in_fit):
@@ -179,37 +182,69 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         self._validate_input(X, in_fit=True)
         return self
 
-    def _get_update_map(self, df):
+    def _get_update_map(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Creates the DataFrame with the values used to fill the NA in the input data during 
+        `transform()`.
+        
+        Either loops through all locations sequentially or chunks input data and processes chunks 
+        in parallel if `parallelize = True`.
+        """
         if not df.isna().any().any():
             return df
         df = df.sort_index()
         if self.parallelize:
-            update_maps = Parallel(**self.parallel_kwargs)(
-                delayed(self._parallel_interpolate)(df, loc)
-                for loc in df.index.get_level_values(self.location_index).unique()
-            )
+            with Parallel(**self.parallel_kwargs) as parallel:
+                # does not necessarily correspond, but quick n_jobs estimation via multiprocessing
+                # to create chunks
+                if parallel.n_jobs < 0:
+                    n_chunks = multiprocessing.cpu_count() + parallel.n_jobs + 1
+                else:
+                    n_chunks = parallel.n_jobs
+                unique_locs = list(df.index.get_level_values(self.location_index).unique())
+                chunk_idxs = np.linspace(0, len(unique_locs), n_chunks + 1, dtype=int)
+                chunk_locs_list = [unique_locs[chunk_idxs[i]: chunk_idxs[i+1]] for i in range(n_chunks)]
+                update_maps = parallel(
+                    delayed(self._locs_interpolate)(
+                        df.loc[df.index.get_level_values(self.location_index).isin(locs)], False
+                    ) for locs in chunk_locs_list
+                )
+                update_map = pd.concat(update_maps)
+        else:
+            update_map = self._locs_interpolate(df)
+        return update_map.sort_index()
+
+    def _locs_interpolate(self, df_interp: pd.DataFrame, progress_bar: bool=True) -> pd.DataFrame:
+        """
+        Loops through individual locations and performs the imputation based on `imputation_method`.
+        """
+        def interpolate_loc(loc) -> pd.DataFrame:
+            df_loc = df_interp.xs(loc, level=self.location_index, drop_level=False)
+            if self.imputation_method == "bfill":
+                loc_map = df_loc.bfill()
+            elif self.imputation_method == "ffill":
+                loc_map = df_loc.ffill()
+            elif self.imputation_method == "fill_all":
+                loc_map = df_loc.bfill().ffill()
+            elif self.imputation_method == "interpolate":
+                loc_map = self._local_fit_interpolate(df_loc)
+            else:
+                # check are performed before, should not happen
+                raise NotImplementedError
+            return loc_map
+        
+        if progress_bar:
+            update_maps = [
+                interpolate_loc(loc) for loc in 
+                tqdm(df_interp.index.get_level_values(self.location_index).unique())
+            ]
         else:
             update_maps = [
-                self._parallel_interpolate(df, loc)
-                for loc in tqdm(df.index.get_level_values(self.location_index).unique())
+                interpolate_loc(loc) for loc in 
+                df_interp.index.get_level_values(self.location_index).unique()
             ]
         update_map = pd.concat(update_maps)
         return update_map
-
-    def _parallel_interpolate(self, df, loc):
-        df_loc = df.xs(loc, level=self.location_index, drop_level=False)
-        if self.imputation_method == "bfill":
-            loc_map = df_loc.bfill()
-        elif self.imputation_method == "ffill":
-            loc_map = df_loc.ffill()
-        elif self.imputation_method == "fill_all":
-            loc_map = df_loc.bfill().ffill()
-        elif self.imputation_method == "interpolate":
-            loc_map = self._local_fit_interpolate(df_loc)
-        else:
-            # check are performed before, should not happen
-            raise NotImplementedError
-        return loc_map
 
     def _local_fit_interpolate(self, df_loc):
         def get_fill_values():
