@@ -1,13 +1,13 @@
 import multiprocessing
-from typing import Literal, List
-from joblib import Parallel, delayed
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_is_fitted
-import pandas as pd
-import numpy as np
+from typing import Literal, List, overload
 import warnings
 
-from tqdm import tqdm
+from joblib import Parallel, delayed
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.impute import KNNImputer
+from sklearn.utils.validation import check_is_fitted
 
 
 class PanelImputer(BaseEstimator, TransformerMixin):
@@ -20,88 +20,172 @@ class PanelImputer(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         location_index: str,
-        time_index: str | List[str] = None,
-        imputation_method: str = "bfill",
+        time_index: str | List[str],
+        missing_values: float | int = np.nan,
+        imputation_method: Literal["bfill", "ffill", "fill_all", "interpolate"] = "bfill",
         interp_method: str = None,
         tail_behavior: str | List[str] = None,
-        missing_values: float | int = np.nan,
+        nan_loc_policy: Literal[None, "mean", "median", "knnimpute"] = None,
+        knn_kwargs: dict = None,
         all_nan_policy: Literal["drop", "error"] = "drop",
         parallelize: bool = False,
         parallel_kwargs: dict = None,
     ):
         """
-        Initializes the PanelImputer instance and set arguments.
+        Initializes the PanelImputer instance and validates arguments.
 
         Args:
             location_index: str
                 name of the index with the location information
 
-            time_index (optional): str|[str], default=None
-                Information the time component in the index, which is used to sort the data if provided. Make sure to either
-                provide this or pass an already sorted dataframe. Accepts lists for multi-indices
+            time_index: str|[str]
+                Information the time component in the index, which is used to sort the data.
+                Accepts lists for multi-level time information (e.g. "year", "quarter").
 
-            imputation_method: str, default='bfill', possible values: ['bfill', 'ffill', 'interpolate']
-                Imputation is performed on a location-by-location basis. For correct results, input df needs to be constructed
-                with a time and a location index. Df either needs to be sorted by time or the time index needs to be passed to
-                the imputer, so the imputation can be performed separately for each location.
+            missing_values: float|int default=np.nan
+                Value of missing values. If not np.nan, all values in df matching missing_values are
+                replaced when calling transform method.
+
+            imputation_method: Literal['bfill', 'ffill', 'fill_all', 'interpolate'], default='bfill'
+                Imputation is performed on a location-by-location basis.
 
                 Available options:
-                'bfill': Imputation using only bfill where newer data is available. Leaves NA's after the most recent data in
-                        place.
-                'ffill': Imputation using only ffill where older data is available. Leaves NA's before the earliest datapoint in
-                        place.
+                'bfill': Imputation using only bfill where newer data is available. Leaves NA's
+                    after the most recent data in place.
+                'ffill': Imputation using only ffill where older data is available. Leaves NA's
+                    before the earliest datapoint in place.
                 'fill_all': Combination of 'bfill' and ffill where no data for backfilling is available.
-                'interpolate': Imputation using pandas interpolate. Needs at least 2 non-nan values.
+                'interpolate': Imputation using pandas interpolate. Needs at least 2 non-nan values,
+                    skipping all-NA locations.
 
-            interp_method: str
-                Interpolation method parameter to be passed for pandas.DataFrame.interpolate. Please note that only linear
-                interpolation is fully tested.
+            interp_method: str, default=None
+                Interpolation method parameter to be passed for pandas.DataFrame.interpolate. Only
+                used and required in case 'imputation_method' is one of ['interpolate',
+                'nan_interpolate']. Please note that only linear interpolation is fully tested.
 
             tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
-                Fill behaviour for nan tails. Can either be a single string, which applies to both ends, or a list/tuple of
-                length 2 for end-specific behavior.
+                Fill behaviour for nan tails. Can either be a single string, which applies to both
+                ends, or a list/tuple of length 2 for end-specific behavior.
 
+                Available options:
+                'None': Do nothing
                 'fill': Fill with last non-nan value in the respective direction.
                 'extrapolate': Extrapolate from given observations according to the chosen interpolation method.
 
-            missing_values: float|int default=np.nan
-                Value of missing values. If not np.nan, all values in df matching missing_values are replaced
-                when calling transform method.
+            nan_loc_policy: Literal[None, 'mean', 'median', 'knnimpute'], default=None
+                Fill strategy for all-NA locations, after initial imputation step. Defaults to None,
+                leaving all-NA locations as is.
+
+                Available options:
+                None: Do nothing
+                'mean': Use the mean value of all other locations on a time-by-time basis
+                'median': Use the median value of all other locations on a time-by-time basis.
+                'knnimpute': Impute using sklearn's KNNImputer. Note that this is a performance
+                    bottleneck since KNNImputer does not support parallelization. Using this option
+                    may multiply imputation time by a large factor.
+
+            knn_kwargs: dict, default=None
+                Dictionary with kwargs to be passed to sklearn's KNNImputer in case nan_interp_policy='knnimpute'.
+                If no kwargs are passed, uses KNNImputer(weights='distance').
 
             all_nan_policy: str, default='drop', possible values: ['drop', 'error']
-                Whether to drop columns with all-nan values and proceed with imputation or raise an error instead.
+                Whether to drop columns with all-nan values and proceed with imputation or raise an
+                error instead.
 
             parallelize: bool, default=False
-                Whether to use parallelization with joblib Parallel. Creates chunks based on the location
-                index. Whether or not parallelization speeds up things may depend on the input data structure.
+                Whether to use parallelization with joblib Parallel. Creates chunks based on the
+                location index.
 
             parallel_kwargs: dict, default=None
-                Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and 
+                Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and
                 parallel_kwargs is None, set to `{"n_jobs": -2}`.
         """
         self.location_index = location_index
         self.time_index = time_index
         self.missing_values = missing_values
+        assert imputation_method in [
+            "bfill",
+            "ffill",
+            "fill_all",
+            "interpolate",
+            "nan_interpolate",
+        ]
         self.imputation_method = imputation_method
-        self.interp_method = interp_method
         self.tail_behavior = tail_behavior
+        if "interpolate" in imputation_method:
+            # tail_behavior
+            if isinstance(tail_behavior, str):
+                assert tail_behavior in ["None", "fill", "extrapolate"]
+            else:
+                assert (
+                    all(isinstance(e, str) for e in tail_behavior)
+                    and (len(tail_behavior) == 2)
+                    and all(
+                        [
+                            tail in ["None", "fill", "extrapolate"]
+                            for tail in tail_behavior
+                        ]
+                    )
+                )
+            # interp_method
+            assert interp_method is not None
+            if interp_method not in ["linear", "slinear"]:
+                warnings.warn(
+                    "Class only tested for linear interpolation, please doublecheck whether imputation leads to desired "
+                    "results."
+                )
+            if (tail_behavior != "fill") and (interp_method == "linear"):
+                warnings.warn(
+                    'Chosen interpolation method "linear" used with pandas.DataFrame.interpolate() leads to unexpected '
+                    'results for tail behavior other than "fill". Using scipy.interpolate.interp1d\'s "slinear" '
+                    "interpolation instead."
+                )
+                interp_method = "slinear"
+            # nan_interp_policy
+        assert nan_loc_policy in [None, "mean", "median", "knnimpute"]
+        self.nan_loc_policy = nan_loc_policy
+        if nan_loc_policy == "knnimpute" and knn_kwargs is None:
+            knn_kwargs = {"weights": "distance"}
+        self.knn_kwargs = knn_kwargs
+        self.interp_method = interp_method
+        if "interpolate" not in imputation_method and (
+            interp_method is not None or tail_behavior is not None
+        ):
+            message = (
+                f"interp_method and tail_behavior are only relevant for interpolation, not for chosen imputation"
+                f'method <"{imputation_method}"> and therefore have no effect. '
+            )
+            warnings.warn(message, UserWarning)
+        assert all_nan_policy in ["drop", "error"]
         self.all_nan_policy = all_nan_policy
         self.parallelize = parallelize
         if parallel_kwargs is None and parallelize:
             parallel_kwargs = {"n_jobs": -2}
         self.parallel_kwargs = parallel_kwargs
 
-    def _validate_input(self, X, in_fit):
+    @overload
+    def _validate_input(self, X, in_fit: Literal[False]) -> pd.DataFrame: ...
+
+    @overload
+    def _validate_input(self, X, in_fit: Literal[True]) -> None: ...
+
+    def _validate_input(self, X, in_fit: bool) -> pd.DataFrame | None:
         # validity check
         try:
-            assert type(X) == pd.DataFrame
+            assert isinstance(X, pd.DataFrame)
         except:
-            if type(X) == pd.Series:
+            if isinstance(X, pd.Series):
                 X = X.to_frame()
             else:
                 raise AssertionError("please pass a pandas DataFrame or Series")
         assert self.location_index in X.index.names
-        assert self.imputation_method in ["bfill", "ffill", "fill_all", "interpolate"]
+
+        time_index_list = (
+            [self.time_index]
+            if isinstance(self.time_index, str)
+            else list(self.time_index)
+        )
+        assert all(time_index in X.index.names for time_index in time_index_list)
 
         if any(X.replace(self.missing_values, np.nan).isna().all()):
             all_nan_cols = X.columns[X.isna().all()].tolist()
@@ -110,43 +194,11 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     f'Cannot impute all-nan columns {all_nan_cols}. Set all_nan_policy="drop" to drop columns.'
                 )
 
-        if self.imputation_method != "interpolate" and (
-            self.interp_method is not None or self.tail_behavior is not None
-        ):
-            message = (
-                f"interp_method and tail_behavior are only relevant for interpolation, not for chosen imputation"
-                f'method <"{self.imputation_method}"> and therefore have no effect. '
-            )
-            warnings.warn(message, UserWarning)
-
         if self.imputation_method == "interpolate":
-            assert (type(self.tail_behavior) is str) or (len(self.tail_behavior) == 2)
-            if len(self.tail_behavior) == 2:
-                assert all(
-                    [
-                        tail in ["None", "fill", "extrapolate"]
-                        for tail in self.tail_behavior
-                    ]
-                )
-
             if any(X.isna().sum() == len(X) - 1):
                 single_nan_cols = X.columns[X.isna().sum() == len(X) - 1].tolist()
                 raise ValueError(
                     f"Cannot interpolate columns with only 1 non-nan value: {single_nan_cols}."
-                )
-
-            if (self.tail_behavior != "fill") and (self.interp_method == "linear"):
-                warnings.warn(
-                    'Chosen interpolation method "linear" used with pandas.DataFrame.interpolate() leads to unexpected '
-                    'results for tail behavior other than "fill". Using scipy.interpolate.interp1d\'s "slinear" '
-                    "interpolation instead."
-                )
-                self.interp_method = "slinear"
-
-            if self.interp_method not in ["linear", "slinear"]:
-                warnings.warn(
-                    "Class only tested for linear interpolation, please doublecheck whether imputation leads to desired "
-                    "results."
                 )
 
         if in_fit:
@@ -164,35 +216,32 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 all_nan_cols = df.columns[df.isna().all()].tolist()
                 df = df.drop(columns=all_nan_cols)
 
-            if self.time_index is not None:
-                time_index_list = (
-                    [self.time_index]
-                    if type(self.time_index) is str
-                    else list(dict.fromkeys(self.time_index))
-                )
-                sort_levels = [self.location_index] + time_index_list
-                df = df.sort_index(level=sort_levels)
-
+            sort_levels = [self.location_index] + time_index_list
+            df = df.reorder_levels(sort_levels)
+            df = df.sort_index()
             return df
 
     def fit(self, X, y=None):
         """
         Performs input checks - actual workload is performed during `transform()`
+
+        For correct results, input df needs to be constructed with a location (and time) index.
+        Df either needs to be sorted by time or the time index needs to be specified during
+        initialization, so the imputation can be performed separately for each location.
         """
         self._validate_input(X, in_fit=True)
         return self
 
     def _get_update_map(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Creates the DataFrame with the values used to fill the NA in the input data during 
+        Creates the DataFrame with the values used to fill the NA in the input data during
         `transform()`.
-        
-        Either loops through all locations sequentially or chunks input data and processes chunks 
+
+        Either loops through all locations sequentially or chunks input data and processes chunks
         in parallel if `parallelize = True`.
         """
         if not df.isna().any().any():
             return df
-        df = df.sort_index()
         if self.parallelize:
             with Parallel(**self.parallel_kwargs) as parallel:
                 # does not necessarily correspond, but quick n_jobs estimation via multiprocessing
@@ -201,23 +250,35 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     n_chunks = multiprocessing.cpu_count() + parallel.n_jobs + 1
                 else:
                     n_chunks = parallel.n_jobs
-                unique_locs = list(df.index.get_level_values(self.location_index).unique())
+                unique_locs = list(
+                    df.index.get_level_values(self.location_index).unique()
+                )
                 chunk_idxs = np.linspace(0, len(unique_locs), n_chunks + 1, dtype=int)
-                chunk_locs_list = [unique_locs[chunk_idxs[i]: chunk_idxs[i+1]] for i in range(n_chunks)]
+                chunk_locs_list = [
+                    unique_locs[chunk_idxs[i] : chunk_idxs[i + 1]]
+                    for i in range(n_chunks)
+                ]
                 update_maps = parallel(
                     delayed(self._locs_interpolate)(
-                        df.loc[df.index.get_level_values(self.location_index).isin(locs)], False
-                    ) for locs in chunk_locs_list
+                        df.loc[
+                            df.index.get_level_values(self.location_index).isin(locs)
+                        ]
+                    )
+                    for locs in chunk_locs_list
                 )
                 update_map = pd.concat(update_maps)
         else:
             update_map = self._locs_interpolate(df)
+        if self.nan_loc_policy is not None:
+            fill_df = self._fill_nan_locs(update_map)
+            update_map.update(fill_df, overwrite=False)
         return update_map.sort_index()
 
-    def _locs_interpolate(self, df_interp: pd.DataFrame, progress_bar: bool=True) -> pd.DataFrame:
+    def _locs_interpolate(self, df_interp: pd.DataFrame) -> pd.DataFrame:
         """
         Loops through individual locations and performs the imputation based on `imputation_method`.
         """
+
         def interpolate_loc(loc) -> pd.DataFrame:
             df_loc = df_interp.xs(loc, level=self.location_index, drop_level=False)
             if self.imputation_method == "bfill":
@@ -232,21 +293,81 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 # check are performed before, should not happen
                 raise NotImplementedError
             return loc_map
-        
-        if progress_bar:
-            update_maps = [
-                interpolate_loc(loc) for loc in 
-                tqdm(df_interp.index.get_level_values(self.location_index).unique())
-            ]
-        else:
-            update_maps = [
-                interpolate_loc(loc) for loc in 
-                df_interp.index.get_level_values(self.location_index).unique()
-            ]
+
+        locs = df_interp.index.get_level_values(self.location_index).unique()
+        update_maps = [interpolate_loc(loc) for loc in locs]
         update_map = pd.concat(update_maps)
         return update_map
 
-    def _local_fit_interpolate(self, df_loc):
+    def _fill_nan_locs(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Impute all-NA locs in already imputed dataframe
+        """
+
+        def impute_nan_loc(loc) -> pd.DataFrame:
+            df_loc = df.xs(loc, level=self.location_index, drop_level=False)
+            cols = df_loc.columns[df_loc.isna().any()].tolist()
+            if len(cols) == 0:
+                return None
+            else:
+                loc_map = pd.DataFrame(index=df_loc.index)
+                for col in cols:
+                    if self.nan_loc_policy == "mean":
+                        try:
+                            loc_map[col] = lookup_df_time.loc[
+                                df_loc.reset_index()[self.time_index], (col, "mean")
+                            ].to_list()
+                        except KeyError:
+                            loc_map[col] = lookup_df_all.loc[("mean", col)].to_list()
+                    elif self.nan_loc_policy == "median":
+                        try:
+                            loc_map[col] = lookup_df_time.loc[
+                                df_loc.reset_index()[self.time_index], (col, "median")
+                            ].to_list()
+                        except KeyError:
+                            loc_map[col] = lookup_df_all.loc[("mean", col)].to_list()
+                    else:
+                        raise NotImplementedError
+                return loc_map
+
+        # do not apply the NA location filling to all-NA times in already imputed/interpolated locs
+        # the assumption is that these are not supposed to be filled in case of "None" tail_behavior
+        # or the bfill/ffill filling strategy, where filling beyond the first/last available date is
+        # not desired
+        if "None" in self.tail_behavior or self.imputation_method in [
+            "bffill",
+            "ffill",
+        ]:
+            all_na_times = df.isna().all(axis=1).groupby(self.time_index).all()
+            all_na_filter = df.reset_index().apply(
+                lambda x: all_na_times.loc[x[self.time_index]], axis=1
+            )
+            # drop from the dataframe
+            df = df.loc[all_na_filter]
+
+        if self.nan_loc_policy in ["mean", "median"]:
+            locs = df.index.get_level_values(self.location_index).unique()
+            # creating a lookup df to do the mean/median based on the point in time if possible
+            lookup_df_time = (
+                df.groupby(self.time_index).agg(["mean", "median"]).dropna()
+            )
+            # fallback option in case of unequal time series in the panel
+            lookup_df_all = df.agg(["mean", "median"]).dropna()
+            update_dfs = [impute_nan_loc(loc) for loc in locs]
+            update_df = pd.concat(
+                [df_loc for df_loc in update_dfs if df_loc is not None]
+            )
+        elif self.nan_loc_policy == "knnimpute":
+            imputer = KNNImputer(**self.knn_kwargs)
+            update_df = pd.DataFrame(
+                imputer.fit_transform(df), index=df.index, columns=df.columns
+            )
+            update_df = update_df.astype(df.dtypes)
+        else:
+            raise NotImplementedError
+        return update_df
+
+    def _local_fit_interpolate(self, df_loc: pd.DataFrame) -> pd.DataFrame:
         def get_fill_values():
             fill_values = (
                 df_loc.loc[df_loc[col].first_valid_index(), col],
@@ -374,15 +495,16 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     different_tails_fill()
         return loc_map
 
-    def transform(self, X, y=None):
+    def transform(self, X: pd.DataFrame | pd.Series, y=None) -> pd.DataFrame:
         """
         Imputes missing values in X where possible.
         """
         # make sure that the imputer was fitted
         check_is_fitted(self, "fit_checks_done_")
-
+        original_index_levels = X.index.names
         df = self._validate_input(X, in_fit=False)
         update_map = self._get_update_map(df)
 
         df.update(update_map, overwrite=False)
+        df = df.reorder_levels(original_index_levels)
         return df
