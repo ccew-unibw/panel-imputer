@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import KNNImputer
 from sklearn.utils.validation import check_is_fitted
+from tqdm import tqdm
 
 
 class PanelImputer(BaseEstimator, TransformerMixin):
@@ -329,9 +330,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 ]
                 update_maps = parallel(
                     delayed(self._locs_interpolate)(
-                        df.loc[
-                            df.index.get_level_values(self.location_index).isin(locs)
-                        ]
+                        df.loc[df.index.get_level_values(self.location_index).isin(locs)], False
                     )
                     for locs in chunk_locs_list
                 )
@@ -343,7 +342,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             update_map.update(fill_df, overwrite=False)
         return update_map.sort_index()
 
-    def _locs_interpolate(self, df_interp: pd.DataFrame) -> pd.DataFrame:
+    def _locs_interpolate(self, df_interp: pd.DataFrame, progress_bar: bool = True) -> pd.DataFrame:
         """Applies the specified imputation method to each location.
 
         This method iterates through each unique location present in the input
@@ -376,7 +375,11 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             return loc_map
 
         locs = df_interp.index.get_level_values(self.location_index).unique()
-        update_maps = [impute_loc(loc) for loc in locs]
+        desc = "step 1" if self.nan_loc_policy is not None else None
+        if progress_bar:
+            update_maps = [impute_loc(loc) for loc in tqdm(locs, desc=desc)]
+        else:
+            update_maps = [impute_loc(loc) for loc in locs]
         update_map = pd.concat(update_maps)
         return update_map
 
@@ -565,7 +568,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     else:
                         raise NotImplementedError
                 return loc_map
-
+            
         # do not apply the NA location filling to all-NA times in already imputed/interpolated locs
         # the assumption is that these are not supposed to be filled in case of "None" tail_behavior
         # or the bfill/ffill filling strategy, where filling beyond the first/last available date is
@@ -594,6 +597,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 [df_loc for df_loc in update_dfs if df_loc is not None]
             )
         elif self.nan_loc_policy == "knnimpute":
+            print("KNN imputation, this may take a while...")
             imputer = KNNImputer(**self.knn_kwargs)
             update_df = pd.DataFrame(
                 imputer.fit_transform(df), index=df.index, columns=df.columns
