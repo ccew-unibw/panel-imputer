@@ -116,22 +116,23 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             "nan_interpolate",
         ]
         self.imputation_method = imputation_method
+        if tail_behavior is None:
+            tail_behavior = "None"
+        elif isinstance(tail_behavior, str):
+            assert tail_behavior in ["None", "fill", "extrapolate"]
+        else:
+            assert (
+                all(isinstance(e, str) for e in tail_behavior)
+                and (len(tail_behavior) == 2)
+                and all(
+                    [
+                        tail in ["None", "fill", "extrapolate"]
+                        for tail in tail_behavior
+                    ]
+                )
+            )
         self.tail_behavior = tail_behavior
         if "interpolate" in imputation_method:
-            # tail_behavior
-            if isinstance(tail_behavior, str):
-                assert tail_behavior in ["None", "fill", "extrapolate"]
-            else:
-                assert (
-                    all(isinstance(e, str) for e in tail_behavior)
-                    and (len(tail_behavior) == 2)
-                    and all(
-                        [
-                            tail in ["None", "fill", "extrapolate"]
-                            for tail in tail_behavior
-                        ]
-                    )
-                )
             # interp_method
             assert interp_method is not None
             if interp_method not in ["linear", "slinear"]:
@@ -557,14 +558,14 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                                 df_loc.reset_index()[self.time_index], (col, "mean")
                             ].to_list()
                         except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("mean", col)].to_list()
+                            loc_map[col] = lookup_df_all.loc[("mean", col)]
                     elif self.nan_loc_policy == "median":
                         try:
                             loc_map[col] = lookup_df_time.loc[
                                 df_loc.reset_index()[self.time_index], (col, "median")
                             ].to_list()
                         except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("mean", col)].to_list()
+                            loc_map[col] = lookup_df_all.loc[("mean", col)]
                     else:
                         raise NotImplementedError
                 return loc_map
@@ -582,7 +583,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 lambda x: all_na_times.loc[x[self.time_index]], axis=1
             )
             # drop from the dataframe
-            df.loc[(~all_na_filter).to_list()]
+            df = df.loc[(~all_na_filter).to_list()]
             
         if self.nan_loc_policy in ["mean", "median"]:
             locs = df.index.get_level_values(self.location_index).unique()

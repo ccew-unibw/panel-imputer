@@ -119,6 +119,13 @@ For more examples, see the jupyter notebook.
 
 ## Changelog:
 
+### 0.8.1
+
+Bugfixes:
+- fixed incorrect tail_behavior input parsing
+- now correctly leaves all-NA rows unimputed
+- fixed bug with mean/median NA-loc filling strategy in case of no other datapoints for a timestep.
+
 ### 0.8.0
 
 - __Potentially breaking:__ `time_index` no longer optional, but required.
