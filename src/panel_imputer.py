@@ -29,6 +29,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         nan_loc_policy: Literal[None, "mean", "median", "knnimpute"] = None,
         knn_kwargs: dict = None,
         all_nan_policy: Literal["drop", "error"] = "drop",
+        verbose: int = 0,
         parallelize: bool = False,
         parallel_kwargs: dict = None,
     ):
@@ -97,13 +98,18 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 Whether to drop columns with all-nan values and proceed with imputation or raise an
                 error instead.
 
+            verbose: int, default=0
+                Controls progress bars and other informational outputs. Values > 0 enable
+                progress bars and messages; 0 disables them. Also used as the default for
+                joblib.Parallel's `verbose` kwarg when parallelization is enabled.
+
             parallelize: bool, default=False
                 Whether to use parallelization with joblib Parallel. Creates chunks based on the
                 location index.
 
             parallel_kwargs: dict, default=None
                 Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and
-                parallel_kwargs is None, set to `{"n_jobs": -2}`.
+                `parallel_kwargs` is None, set to `{"n_jobs": -2, "verbose": verbose}`.
         """
         self.location_index = location_index
         self.time_index = time_index
@@ -164,9 +170,13 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             warnings.warn(message, UserWarning)
         assert all_nan_policy in ["drop", "error"]
         self.all_nan_policy = all_nan_policy
+        self.verbose = verbose
         self.parallelize = parallelize
-        if parallel_kwargs is None and parallelize:
-            parallel_kwargs = {"n_jobs": -2}
+        if parallelize:
+            if parallel_kwargs is None:
+                parallel_kwargs = {"n_jobs": -2}
+            # ensure joblib gets a default verbose consistent with our verbosity
+            parallel_kwargs.setdefault("verbose", self.verbose)
         self.parallel_kwargs = parallel_kwargs
 
     def fit(self, X: pd.DataFrame | pd.Series, y=None):
@@ -337,7 +347,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 )
                 update_map = pd.concat(update_maps)
         else:
-            update_map = self._locs_interpolate(df)
+            update_map = self._locs_interpolate(df, progress_bar=self.verbose > 0)
         if self.nan_loc_policy is not None:
             fill_df = self._fill_nan_locs(update_map)
             update_map.update(fill_df, overwrite=False)
@@ -598,7 +608,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 [df_loc for df_loc in update_dfs if df_loc is not None]
             )
         elif self.nan_loc_policy == "knnimpute":
-            print("KNN imputation, this may take a while...")
+            if self.verbose > 0:
+                print("KNN imputation, this may take a while...")
             imputer = KNNImputer(**self.knn_kwargs)
             update_df = pd.DataFrame(
                 imputer.fit_transform(df), index=df.index, columns=df.columns

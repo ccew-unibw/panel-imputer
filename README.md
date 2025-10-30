@@ -68,6 +68,11 @@ all_nan_policy: str, default='drop', possible values: ['drop', 'error']
     Whether to drop columns with all-nan values and proceed with imputation or raise an
     error instead.
 
+verbose: int, default=0
+    Controls progress bars and other informational outputs. Values > 0 enable
+    progress bars and messages; 0 disables them. Also used as the default for
+    joblib.Parallel's `verbose` kwarg when parallelization is enabled.
+
 parallelize: bool, default=False
     Whether to use parallelization with joblib Parallel. Creates chunks based on the
     location index.
@@ -118,6 +123,10 @@ For more examples, see the jupyter notebook.
 
 
 ## Changelog:
+
+### 0.8.2
+
+- Added `verbose` option to control whether to print progress information.
 
 ### 0.8.1
 
