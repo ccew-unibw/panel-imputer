@@ -70,7 +70,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 'nan_interpolate']. Please note that only linear interpolation is fully tested.
 
             tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
-                Fill behaviour for nan tails. Can either be a single string, which applies to both
+                Fill behavior for nan tails. Can either be a single string, which applies to both
                 ends, or a list/tuple of length 2 for end-specific behavior.
 
                 Available options:
@@ -161,7 +161,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         self.knn_kwargs = knn_kwargs
         self.interp_method = interp_method
         if "interpolate" not in imputation_method and (
-            interp_method is not None or tail_behavior is not None
+            interp_method is not None or tail_behavior != "None"
         ):
             message = (
                 f"interp_method and tail_behavior are only relevant for interpolation, not for chosen imputation"
@@ -270,16 +270,22 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         )
         assert all(time_index in X.index.names for time_index in time_index_list)
 
-        if any(X.replace(self.missing_values, np.nan).isna().all()):
-            all_nan_cols = X.columns[X.isna().all()].tolist()
+        # convert missing_values to NA before NA checks
+        df = X.copy()
+        if not np.isnan(self.missing_values):
+            df = df.replace(self.missing_values, np.nan)
+
+
+        if any(df.isna().all()):
+            all_nan_cols = df.columns[df.isna().all()].tolist()
             if self.all_nan_policy == "error":
                 raise ValueError(
                     f'Cannot impute all-nan columns {all_nan_cols}. Set all_nan_policy="drop" to drop columns.'
                 )
 
         if self.imputation_method == "interpolate":
-            if any(X.isna().sum() == len(X) - 1):
-                single_nan_cols = X.columns[X.isna().sum() == len(X) - 1].tolist()
+            if any(df.isna().sum() == len(df) - 1):
+                single_nan_cols = df.columns[df.isna().sum() == len(df) - 1].tolist()
                 raise ValueError(
                     f"Cannot interpolate columns with only 1 non-nan value: {single_nan_cols}."
                 )
@@ -290,11 +296,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             return
 
         else:
-            # process input
-            df = X.copy()
-            if not np.isnan(self.missing_values):
-                df.replace(self.missing_values, np.nan)
-
+            # make required changes to input for imputation logic
             if any(df.isna().all()) and self.all_nan_policy == "drop":
                 all_nan_cols = df.columns[df.isna().all()].tolist()
                 df = df.drop(columns=all_nan_cols)
