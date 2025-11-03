@@ -110,8 +110,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 location index.
 
             parallel_kwargs: dict, default=None
-                Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and
-                `parallel_kwargs` is None, set to `{"n_jobs": -2, "verbose": verbose}`.
+                Dictionary with kwargs to be passed to joblib Parallel. Unless otherwise specified,
+                default values set are `{"n_jobs": -2, "verbose": verbose}`.
         """
         self.location_index = location_index
         self.time_index = time_index
@@ -178,6 +178,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 parallel_kwargs = {"n_jobs": -2}
             # ensure joblib gets a default verbose consistent with our verbosity
             parallel_kwargs.setdefault("verbose", self.verbose)
+            # set n_jobs default even if not set by user for consistency
+            parallel_kwargs.setdefault("n_jobs", -2)
         self.parallel_kwargs = parallel_kwargs
 
     def fit(self, X: pd.DataFrame | pd.Series, y=None):
@@ -293,7 +295,25 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 )
 
         if in_fit:
-            # just validate input, the actual work is done in transform
+            if self.parallelize:
+                # make sure parallel does not fail with small dfs and warn user
+                unique_loc_count = len(df.index.get_level_values(self.location_index).unique())
+                requested_jobs = self.parallel_kwargs.get("n_jobs")
+                if requested_jobs is None:
+                    effective_jobs = 1 # Parallel() default behavior
+                elif requested_jobs < 0:
+                    effective_jobs = multiprocessing.cpu_count() + requested_jobs + 1
+                else:
+                    effective_jobs = requested_jobs
+                if effective_jobs > unique_loc_count:
+                    warnings.warn(
+                        f"Parallel execution requested n_jobs={requested_jobs} "
+                        f"(effective {effective_jobs}) but only {unique_loc_count} unique "
+                        f"locations are available; reducing n_jobs to {unique_loc_count}.",
+                        UserWarning,
+                    )
+                    self.parallel_kwargs["n_jobs"] = unique_loc_count
+                
             self.fit_checks_done_ = True
             return
 
@@ -307,6 +327,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             df = df.reorder_levels(sort_levels)
             df = df.sort_index()
             return df
+
 
     def _get_update_map(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generates a DataFrame of imputed values.
