@@ -35,12 +35,14 @@ imputation_method: Literal['bfill', 'ffill', 'fill_all', 'interpolate'], default
         skipping all-NA locations.
 
 interp_method: str, default=None
-    Interpolation method parameter to be passed for pandas.DataFrame.interpolate. Only
-    used and required in case 'imputation_method' is one of ['interpolate',
-    'nan_interpolate']. Please note that only linear interpolation is fully tested.
+    Interpolation method parameter to be passed to pandas.DataFrame.interpolate. Only
+    used and required in case 'imputation_method'='interpolate'.
+    
+    Please note that only 'linear' interpolation is currently supported, 
+    others may or may not work.
 
 tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
-    Fill behaviour for nan tails. Can either be a single string, which applies to both
+    Fill behavior for nan tails. Can either be a single string, which applies to both
     ends, or a list/tuple of length 2 for end-specific behavior.
 
     Available options:
@@ -68,13 +70,18 @@ all_nan_policy: str, default='drop', possible values: ['drop', 'error']
     Whether to drop columns with all-nan values and proceed with imputation or raise an
     error instead.
 
+verbose: int, default=0
+    Controls progress bars and other informational outputs. Values > 0 enable
+    progress bars and messages; 0 disables them. Also used as the default for
+    joblib.Parallel's `verbose` kwarg when parallelization is enabled.
+
 parallelize: bool, default=False
     Whether to use parallelization with joblib Parallel. Creates chunks based on the
     location index.
 
 parallel_kwargs: dict, default=None
-    Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and
-    parallel_kwargs is None, set to `{"n_jobs": -2}`.
+    Dictionary with kwargs to be passed to joblib Parallel. Unless otherwise specified,
+    default values used are `n_jobs = -2`, `verbose = verbose`.
 ```
 
 **Methods:**
@@ -118,6 +125,18 @@ For more examples, see the jupyter notebook.
 
 
 ## Changelog:
+
+### 0.8.2
+
+Improvements:
+- Added `verbose` option to control whether to print progress information.
+- Parallel will automatically reduce the number of `n_jobs` to prevent crashing if used with too few locations.
+- Added a test suite for the PanelImputer class.
+- DataFrame index is now preserved through imputation.
+
+Bugfixes:
+- Fixes provided NA value through `missing_values` now correctly applied.
+- Fixes erroneous warning related to tail_behavior.
 
 ### 0.8.1
 

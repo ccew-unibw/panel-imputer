@@ -29,6 +29,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         nan_loc_policy: Literal[None, "mean", "median", "knnimpute"] = None,
         knn_kwargs: dict = None,
         all_nan_policy: Literal["drop", "error"] = "drop",
+        verbose: int = 0,
         parallelize: bool = False,
         parallel_kwargs: dict = None,
     ):
@@ -64,12 +65,14 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     skipping all-NA locations.
 
             interp_method: str, default=None
-                Interpolation method parameter to be passed for pandas.DataFrame.interpolate. Only
-                used and required in case 'imputation_method' is one of ['interpolate',
-                'nan_interpolate']. Please note that only linear interpolation is fully tested.
+                Interpolation method parameter to be passed to pandas.DataFrame.interpolate. Only
+                used and required in case 'imputation_method'='interpolate'.
+                
+                Please note that only 'linear' interpolation is currently supported, 
+                others may or may not work.
 
             tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
-                Fill behaviour for nan tails. Can either be a single string, which applies to both
+                Fill behavior for nan tails. Can either be a single string, which applies to both
                 ends, or a list/tuple of length 2 for end-specific behavior.
 
                 Available options:
@@ -97,13 +100,18 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 Whether to drop columns with all-nan values and proceed with imputation or raise an
                 error instead.
 
+            verbose: int, default=0
+                Controls progress bars and other informational outputs. Values > 0 enable
+                progress bars and messages; 0 disables them. Also used as the default for
+                joblib.Parallel's `verbose` kwarg when parallelization is enabled.
+
             parallelize: bool, default=False
                 Whether to use parallelization with joblib Parallel. Creates chunks based on the
                 location index.
 
             parallel_kwargs: dict, default=None
-                Dictionary with kwargs to be passed to joblib Parallel. If `parallelize=True` and
-                parallel_kwargs is None, set to `{"n_jobs": -2}`.
+                Dictionary with kwargs to be passed to joblib Parallel. Unless otherwise specified,
+                default values used are `n_jobs = -2`, `verbose = verbose`.
         """
         self.location_index = location_index
         self.time_index = time_index
@@ -113,7 +121,6 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             "ffill",
             "fill_all",
             "interpolate",
-            "nan_interpolate",
         ]
         self.imputation_method = imputation_method
         if tail_behavior is None:
@@ -155,7 +162,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         self.knn_kwargs = knn_kwargs
         self.interp_method = interp_method
         if "interpolate" not in imputation_method and (
-            interp_method is not None or tail_behavior is not None
+            interp_method is not None or tail_behavior != "None"
         ):
             message = (
                 f"interp_method and tail_behavior are only relevant for interpolation, not for chosen imputation"
@@ -164,9 +171,15 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             warnings.warn(message, UserWarning)
         assert all_nan_policy in ["drop", "error"]
         self.all_nan_policy = all_nan_policy
+        self.verbose = verbose
         self.parallelize = parallelize
-        if parallel_kwargs is None and parallelize:
-            parallel_kwargs = {"n_jobs": -2}
+        if parallelize:
+            if parallel_kwargs is None:
+                parallel_kwargs = {"n_jobs": -2}
+            # ensure joblib gets a default verbose consistent with our verbosity
+            parallel_kwargs.setdefault("verbose", self.verbose)
+            # set n_jobs default even if not set by user for consistency
+            parallel_kwargs.setdefault("n_jobs", -2)
         self.parallel_kwargs = parallel_kwargs
 
     def fit(self, X: pd.DataFrame | pd.Series, y=None):
@@ -195,7 +208,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         This method orchestrates the imputation workflow for the provided
         DataFrame or Series `X`. It first validates and prepares the data, then 
         generates the imputed values using the configured strategies, and finally
-        updates the original DataFrame with these new values.
+        updates the original DataFrame with these new values. Original index is
+        preserved in the output.
 
         Args:
             X: The input pandas DataFrame with a MultiIndex containing location
@@ -205,15 +219,18 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         Returns:
             A pandas DataFrame with missing values imputed according to the
             instance's configuration.
+            
+        Note: 
+            Remaining missing values are now coded np.nan.
         """
         # make sure that the imputer was fitted
         check_is_fitted(self, "fit_checks_done_")
-        original_index_levels = X.index.names
+        original_index = X.index
         df = self._validate_input(X, in_fit=False)
         update_map = self._get_update_map(df)
         df.update(update_map, overwrite=False)
         # level order may be modified during input validation
-        df = df.reorder_levels(original_index_levels)
+        df = df.reorder_levels(original_index.names).loc[original_index]
         return df
 
     @overload
@@ -260,31 +277,51 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         )
         assert all(time_index in X.index.names for time_index in time_index_list)
 
-        if any(X.replace(self.missing_values, np.nan).isna().all()):
-            all_nan_cols = X.columns[X.isna().all()].tolist()
+        # convert missing_values to NA before NA checks
+        df = X.copy()
+        if not np.isnan(self.missing_values):
+            df = df.replace(self.missing_values, np.nan)
+
+
+        if any(df.isna().all()):
+            all_nan_cols = df.columns[df.isna().all()].tolist()
             if self.all_nan_policy == "error":
                 raise ValueError(
                     f'Cannot impute all-nan columns {all_nan_cols}. Set all_nan_policy="drop" to drop columns.'
                 )
 
         if self.imputation_method == "interpolate":
-            if any(X.isna().sum() == len(X) - 1):
-                single_nan_cols = X.columns[X.isna().sum() == len(X) - 1].tolist()
+            if any(df.isna().sum() == len(df) - 1):
+                single_nan_cols = df.columns[df.isna().sum() == len(df) - 1].tolist()
                 raise ValueError(
                     f"Cannot interpolate columns with only 1 non-nan value: {single_nan_cols}."
                 )
 
         if in_fit:
-            # just validate input, the actual work is done in transform
+            if self.parallelize:
+                # make sure parallel does not fail with small dfs and warn user
+                unique_loc_count = len(df.index.get_level_values(self.location_index).unique())
+                requested_jobs = self.parallel_kwargs.get("n_jobs")
+                if requested_jobs is None:
+                    effective_jobs = 1 # Parallel() default behavior
+                elif requested_jobs < 0:
+                    effective_jobs = multiprocessing.cpu_count() + requested_jobs + 1
+                else:
+                    effective_jobs = requested_jobs
+                if effective_jobs > unique_loc_count:
+                    warnings.warn(
+                        f"Parallel execution requested n_jobs={requested_jobs} "
+                        f"(effective {effective_jobs}) but only {unique_loc_count} unique "
+                        f"locations are available; reducing n_jobs to {unique_loc_count}.",
+                        UserWarning,
+                    )
+                    self.parallel_kwargs["n_jobs"] = unique_loc_count
+                
             self.fit_checks_done_ = True
             return
 
         else:
-            # process input
-            df = X.copy()
-            if not np.isnan(self.missing_values):
-                df.replace(self.missing_values, np.nan)
-
+            # make required changes to input for imputation logic
             if any(df.isna().all()) and self.all_nan_policy == "drop":
                 all_nan_cols = df.columns[df.isna().all()].tolist()
                 df = df.drop(columns=all_nan_cols)
@@ -293,6 +330,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             df = df.reorder_levels(sort_levels)
             df = df.sort_index()
             return df
+
 
     def _get_update_map(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generates a DataFrame of imputed values.
@@ -337,7 +375,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 )
                 update_map = pd.concat(update_maps)
         else:
-            update_map = self._locs_interpolate(df)
+            update_map = self._locs_interpolate(df, progress_bar=self.verbose > 0)
         if self.nan_loc_policy is not None:
             fill_df = self._fill_nan_locs(update_map)
             update_map.update(fill_df, overwrite=False)
@@ -598,7 +636,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 [df_loc for df_loc in update_dfs if df_loc is not None]
             )
         elif self.nan_loc_policy == "knnimpute":
-            print("KNN imputation, this may take a while...")
+            if self.verbose > 0:
+                print("KNN imputation, this may take a while...")
             imputer = KNNImputer(**self.knn_kwargs)
             update_df = pd.DataFrame(
                 imputer.fit_transform(df), index=df.index, columns=df.columns
