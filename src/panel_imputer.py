@@ -111,7 +111,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
 
             parallel_kwargs: dict, default=None
                 Dictionary with kwargs to be passed to joblib Parallel. Unless otherwise specified,
-                default values set are `{"n_jobs": -2, "verbose": verbose}`.
+                default values used are `n_jobs = -2`, `verbose = verbose`.
         """
         self.location_index = location_index
         self.time_index = time_index
