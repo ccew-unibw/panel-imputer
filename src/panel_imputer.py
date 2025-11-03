@@ -65,9 +65,11 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                     skipping all-NA locations.
 
             interp_method: str, default=None
-                Interpolation method parameter to be passed for pandas.DataFrame.interpolate. Only
-                used and required in case 'imputation_method' is one of ['interpolate',
-                'nan_interpolate']. Please note that only linear interpolation is fully tested.
+                Interpolation method parameter to be passed to pandas.DataFrame.interpolate. Only
+                used and required in case 'imputation_method'='interpolate'.
+                
+                Please note that only 'linear' interpolation is currently supported, 
+                others may or may not work.
 
             tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
                 Fill behavior for nan tails. Can either be a single string, which applies to both
@@ -119,7 +121,6 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             "ffill",
             "fill_all",
             "interpolate",
-            "nan_interpolate",
         ]
         self.imputation_method = imputation_method
         if tail_behavior is None:
@@ -205,7 +206,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         This method orchestrates the imputation workflow for the provided
         DataFrame or Series `X`. It first validates and prepares the data, then 
         generates the imputed values using the configured strategies, and finally
-        updates the original DataFrame with these new values.
+        updates the original DataFrame with these new values. Original index is
+        preserved in the output.
 
         Args:
             X: The input pandas DataFrame with a MultiIndex containing location
@@ -218,12 +220,12 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         """
         # make sure that the imputer was fitted
         check_is_fitted(self, "fit_checks_done_")
-        original_index_levels = X.index.names
+        original_index = X.index
         df = self._validate_input(X, in_fit=False)
         update_map = self._get_update_map(df)
         df.update(update_map, overwrite=False)
         # level order may be modified during input validation
-        df = df.reorder_levels(original_index_levels)
+        df = df.reorder_levels(original_index.names).loc[original_index]
         return df
 
     @overload
