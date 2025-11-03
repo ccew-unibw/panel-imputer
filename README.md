@@ -135,7 +135,7 @@ Improvements:
 - DataFrame index is now preserved through imputation.
 
 Bugfixes:
-- Fixes provided NA value through `missing_values` now correctly applied.
+- Provided NA value through `missing_values` now correctly applied.
 - Fixes erroneous warning related to tail_behavior.
 
 ### 0.8.1
