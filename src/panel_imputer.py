@@ -219,6 +219,9 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         Returns:
             A pandas DataFrame with missing values imputed according to the
             instance's configuration.
+            
+        Note: 
+            Remaining missing values are now coded np.nan.
         """
         # make sure that the imputer was fitted
         check_is_fitted(self, "fit_checks_done_")
