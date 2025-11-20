@@ -23,11 +23,14 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         location_index: str,
         time_index: str | List[str],
         missing_values: float | int = np.nan,
-        imputation_method: Literal["bfill", "ffill", "fill_all", "interpolate"] = "bfill",
+        imputation_method: Literal[
+            "bfill", "ffill", "fill_all", "interpolate"
+        ] = "bfill",
         interp_method: str = None,
         tail_behavior: str | List[str] = None,
         nan_loc_policy: Literal[None, "mean", "median", "knnimpute"] = None,
         knn_kwargs: dict = None,
+        knn_performance: bool = False,
         all_nan_policy: Literal["drop", "error"] = "drop",
         verbose: int = 0,
         parallelize: bool = False,
@@ -35,9 +38,9 @@ class PanelImputer(BaseEstimator, TransformerMixin):
     ):
         """
         Initializes the PanelImputer instance and validates arguments.
-        
+
         Sets up the configuration for the imputation process, including identifiers
-        for location and time, the imputation strategy, and policies for handling 
+        for location and time, the imputation strategy, and policies for handling
         various edge cases such as all-NaN slices.
 
         Args:
@@ -67,8 +70,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             interp_method: str, default=None
                 Interpolation method parameter to be passed to pandas.DataFrame.interpolate. Only
                 used and required in case 'imputation_method'='interpolate'.
-                
-                Please note that only 'linear' interpolation is currently supported, 
+
+                Please note that only 'linear' interpolation is currently supported,
                 others may or may not work.
 
             tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
@@ -95,6 +98,13 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             knn_kwargs: dict, default=None
                 Dictionary with kwargs to be passed to sklearn's KNNImputer in case nan_interp_policy='knnimpute'.
                 If no kwargs are passed, uses KNNImputer(weights='distance').
+
+            knn_performance: bool, default=False
+                Flag to indicate wether to speed up KNN imputation by splitting the data into its
+                time steps and imputing them independently (Sequentially or in parallel if
+                parallelize=True). This speeds up performance at the cost of imputation accuracy,
+                since this means there are only the datapoints from the same time step available to
+                impute from.
 
             all_nan_policy: str, default='drop', possible values: ['drop', 'error']
                 Whether to drop columns with all-nan values and proceed with imputation or raise an
@@ -132,10 +142,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 all(isinstance(e, str) for e in tail_behavior)
                 and (len(tail_behavior) == 2)
                 and all(
-                    [
-                        tail in ["None", "fill", "extrapolate"]
-                        for tail in tail_behavior
-                    ]
+                    [tail in ["None", "fill", "extrapolate"] for tail in tail_behavior]
                 )
             )
         self.tail_behavior = tail_behavior
@@ -160,6 +167,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         if nan_loc_policy == "knnimpute" and knn_kwargs is None:
             knn_kwargs = {"weights": "distance"}
         self.knn_kwargs = knn_kwargs
+        self.knn_performance = knn_performance
         self.interp_method = interp_method
         if "interpolate" not in imputation_method and (
             interp_method is not None or tail_behavior != "None"
@@ -206,7 +214,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         """Applies the imputation to the input data.
 
         This method orchestrates the imputation workflow for the provided
-        DataFrame or Series `X`. It first validates and prepares the data, then 
+        DataFrame or Series `X`. It first validates and prepares the data, then
         generates the imputed values using the configured strategies, and finally
         updates the original DataFrame with these new values. Original index is
         preserved in the output.
@@ -219,8 +227,8 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         Returns:
             A pandas DataFrame with missing values imputed according to the
             instance's configuration.
-            
-        Note: 
+
+        Note:
             Remaining missing values are now coded np.nan.
         """
         # make sure that the imputer was fitted
@@ -282,7 +290,6 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         if not np.isnan(self.missing_values):
             df = df.replace(self.missing_values, np.nan)
 
-
         if any(df.isna().all()):
             all_nan_cols = df.columns[df.isna().all()].tolist()
             if self.all_nan_policy == "error":
@@ -298,25 +305,6 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 )
 
         if in_fit:
-            if self.parallelize:
-                # make sure parallel does not fail with small dfs and warn user
-                unique_loc_count = len(df.index.get_level_values(self.location_index).unique())
-                requested_jobs = self.parallel_kwargs.get("n_jobs")
-                if requested_jobs is None:
-                    effective_jobs = 1 # Parallel() default behavior
-                elif requested_jobs < 0:
-                    effective_jobs = multiprocessing.cpu_count() + requested_jobs + 1
-                else:
-                    effective_jobs = requested_jobs
-                if effective_jobs > unique_loc_count:
-                    warnings.warn(
-                        f"Parallel execution requested n_jobs={requested_jobs} "
-                        f"(effective {effective_jobs}) but only {unique_loc_count} unique "
-                        f"locations are available; reducing n_jobs to {unique_loc_count}.",
-                        UserWarning,
-                    )
-                    self.parallel_kwargs["n_jobs"] = unique_loc_count
-                
             self.fit_checks_done_ = True
             return
 
@@ -331,6 +319,41 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             df = df.sort_index()
             return df
 
+    def _validate_parallel_jobs(
+        self, df: pd.DataFrame, index_level: str | list[str]
+    ) -> None:
+        """Validates Parallel n_jobs in relation to the DataFrame.
+
+        Ensures Parallel() does not fail with small dfs by comparing n_jobs to the
+        maximum number of parallel calculations for the given index_level and updates
+        "n_jobs" in self.parallel_kwargs. Warns user if updated.
+
+        Args:
+            df (pd.DataFrame): DataFrame on which the parallel operation is planned.
+            index_level (str): The index along which the df will be chunked by Parallel.
+
+        """
+        if isinstance(index_level, list):
+            drop = [n for n in df.index.names if n not in index_level]
+            unique_count = len(df.index.droplevel(drop).unique())
+        else:
+            unique_count = len(df.index.get_level_values(index_level).unique())
+        requested_jobs = self.parallel_kwargs.get("n_jobs")
+        if requested_jobs is None:
+            effective_jobs = 1  # Parallel() default behavior
+        elif requested_jobs < 0:
+            effective_jobs = multiprocessing.cpu_count() + requested_jobs + 1
+        else:
+            effective_jobs = requested_jobs
+        if effective_jobs > unique_count:
+            warnings.warn(
+                f"Parallel execution requested n_jobs={requested_jobs} "
+                f"(effective {effective_jobs}) but only {unique_count} unique "
+                f"values are available for index {index_level}; reducing n_jobs"
+                f"to {unique_count}.",
+                UserWarning,
+            )
+            self.parallel_kwargs["n_jobs"] = unique_count
 
     def _get_update_map(self, df: pd.DataFrame) -> pd.DataFrame:
         """Generates a DataFrame of imputed values.
@@ -339,7 +362,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         input DataFrame by location and applies the chosen imputation method to
         each location's time series. If `parallelize` is set to True, this
         process is chunked and performed via joblib.Parallel. After the primary
-        imputation, it handles any locations that are still entirely NaN 
+        imputation, it handles any locations that are still entirely NaN
         according to the specified `nan_loc_policy`.
 
         Args:
@@ -352,6 +375,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         if not df.isna().any().any():
             return df
         if self.parallelize:
+            self._validate_parallel_jobs(df, self.location_index)
             with Parallel(**self.parallel_kwargs) as parallel:
                 # does not necessarily correspond, but quick n_jobs estimation via multiprocessing
                 # to create chunks
@@ -369,7 +393,10 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 ]
                 update_maps = parallel(
                     delayed(self._locs_interpolate)(
-                        df.loc[df.index.get_level_values(self.location_index).isin(locs)], False
+                        df.loc[
+                            df.index.get_level_values(self.location_index).isin(locs)
+                        ],
+                        False,
                     )
                     for locs in chunk_locs_list
                 )
@@ -381,17 +408,19 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             update_map.update(fill_df, overwrite=False)
         return update_map.sort_index()
 
-    def _locs_interpolate(self, df_interp: pd.DataFrame, progress_bar: bool = True) -> pd.DataFrame:
+    def _locs_interpolate(
+        self, df_interp: pd.DataFrame, progress_bar: bool = True
+    ) -> pd.DataFrame:
         """Applies the specified imputation method to each location.
 
         This method iterates through each unique location present in the input
         DataFrame. For each location, it applies the imputation method defined
-        during initialization ['bfill', 'ffill', 'fill_all', 'interpolate']. 
+        during initialization ['bfill', 'ffill', 'fill_all', 'interpolate'].
         This forms the first pass of the imputation process which is always
         performed, focused on filling gaps within each individual time series.
 
         Args:
-            df_interp: A subset of the preprocessed DataFrame containing 
+            df_interp: A subset of the preprocessed DataFrame containing
                 some or all locations.
 
         Returns:
@@ -437,6 +466,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         Returns:
             A DataFrame with interpolated values for that location.
         """
+
         def get_fill_values():
             fill_values = (
                 df_loc.loc[df_loc[col].first_valid_index(), col],
@@ -582,6 +612,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         Returns:
             A DataFrame with imputed values for the previously all-NaN locations.
         """
+
         def impute_nan_loc(loc) -> pd.DataFrame:
             df_loc = df.xs(loc, level=self.location_index, drop_level=False)
             cols = df_loc.columns[df_loc.isna().any()].tolist()
@@ -603,17 +634,17 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                                 df_loc.reset_index()[self.time_index], (col, "median")
                             ].to_list()
                         except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("mean", col)]
+                            loc_map[col] = lookup_df_all.loc[("median", col)]
                     else:
                         raise NotImplementedError
                 return loc_map
-            
+
         # do not apply the NA location filling to all-NA times in already imputed/interpolated locs
         # the assumption is that these are not supposed to be filled in case of "None" tail_behavior
         # or the bfill/ffill filling strategy, where filling beyond the first/last available date is
         # not desired
         if "None" in self.tail_behavior or self.imputation_method in [
-            "bffill",
+            "bfill",
             "ffill",
         ]:
             all_na_times = df.isna().all(axis=1).groupby(self.time_index).all()
@@ -622,7 +653,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             )
             # drop from the dataframe
             df = df.loc[(~all_na_filter).to_list()]
-            
+
         if self.nan_loc_policy in ["mean", "median"]:
             locs = df.index.get_level_values(self.location_index).unique()
             # creating a lookup df to do the mean/median based on the point in time if possible
@@ -639,10 +670,47 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             if self.verbose > 0:
                 print("KNN imputation, this may take a while...")
             imputer = KNNImputer(**self.knn_kwargs)
-            update_df = pd.DataFrame(
-                imputer.fit_transform(df), index=df.index, columns=df.columns
-            )
+            if self.knn_performance:
+                update_df = self._knn_performance_imputation(df, imputer)
+            else:
+                update_df = pd.DataFrame(
+                    imputer.fit_transform(df), index=df.index, columns=df.columns
+                )
             update_df = update_df.astype(df.dtypes)
         else:
             raise NotImplementedError
+        return update_df
+
+    def _knn_performance_imputation(self, df: pd.DataFrame, imputer: KNNImputer):
+        """Performs KNN imputation on a time-step by time-step basis.
+
+        This method speeds up KNN imputation for large panel datasets by splitting the
+        DataFrame into time steps and imputing them independently. This reduces the
+        complexity of the nearest neighbor search significantly but comes at the cost
+        of accuracy, since there is (far) less data to impute from.
+
+        Args:
+            df: The imputed DataFrame except for all-NA locs.
+            imputer: An initialized sklearn.impute.KNNImputer instance.
+
+        Returns:
+            A pandas DataFrame with the same shape and index as the input, containing
+            the values imputed via the step-wise KNN strategy.
+        """
+
+        def process_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+            imputed_data = imputer.fit_transform(chunk)
+            return pd.DataFrame(imputed_data, index=chunk.index, columns=chunk.columns)
+
+        grouped = df.groupby(self.time_index, group_keys=False)
+        if self.parallelize:
+            self._validate_parallel_jobs(df, self.time_index)
+            # for smaller datasets, this is slower than sequential imputation,
+            # but also parallelization  makes less sense there
+            # Could set to its own parallel setting in the future if needed
+            with Parallel(**self.parallel_kwargs) as parallel:
+                dfs = parallel(delayed(process_chunk)(chunk) for _, chunk in grouped)
+        else:
+            dfs = [process_chunk(chunk) for _, chunk in grouped]
+        update_df = pd.concat(dfs).sort_index()
         return update_df

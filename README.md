@@ -37,8 +37,8 @@ imputation_method: Literal['bfill', 'ffill', 'fill_all', 'interpolate'], default
 interp_method: str, default=None
     Interpolation method parameter to be passed to pandas.DataFrame.interpolate. Only
     used and required in case 'imputation_method'='interpolate'.
-    
-    Please note that only 'linear' interpolation is currently supported, 
+
+    Please note that only 'linear' interpolation is currently supported,
     others may or may not work.
 
 tail_behavior: str, [str], possible values: ['fill', 'None', 'extrapolate']
@@ -66,6 +66,13 @@ knn_kwargs: dict, default=None
     Dictionary with kwargs to be passed to sklearn's KNNImputer in case nan_interp_policy='knnimpute'.
     If no kwargs are passed, uses KNNImputer(weights='distance').
 
+knn_performance: bool, default=False
+    Flag to indicate wether to speed up KNN imputation by splitting the data into its
+    time steps and imputing them independently (Sequentially or in parallel if
+    parallelize=True). This speeds up performance at the cost of imputation accuracy,
+    since this means there are only the datapoints from the same time step available to
+    impute from.
+
 all_nan_policy: str, default='drop', possible values: ['drop', 'error']
     Whether to drop columns with all-nan values and proceed with imputation or raise an
     error instead.
@@ -82,6 +89,7 @@ parallelize: bool, default=False
 parallel_kwargs: dict, default=None
     Dictionary with kwargs to be passed to joblib Parallel. Unless otherwise specified,
     default values used are `n_jobs = -2`, `verbose = verbose`.
+
 ```
 
 **Methods:**
@@ -125,6 +133,15 @@ For more examples, see the jupyter notebook.
 
 
 ## Changelog:
+
+### 0.8.3
+
+Improvements:
+- Added a "Performance" mode for KNN imputation for all-NA locations, where imputation is performed for each timestep independently. This reduces imputation accuracy but significantly speeds up the process. Avalaible though the `knn_performance` flag.
+
+Bugfixes:
+- Fixed a bug where NA values were not correctly preserved during all-NA location imputation for the 'bfill' strategy.
+- Fixed a bug where the wrong fallback value was used during median all-NA location imputation in case of unique timestamps for a location.
 
 ### 0.8.2
 
