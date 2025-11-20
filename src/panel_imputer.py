@@ -634,7 +634,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                                 df_loc.reset_index()[self.time_index], (col, "median")
                             ].to_list()
                         except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("mean", col)]
+                            loc_map[col] = lookup_df_all.loc[("median", col)]
                     else:
                         raise NotImplementedError
                 return loc_map
@@ -644,7 +644,7 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         # or the bfill/ffill filling strategy, where filling beyond the first/last available date is
         # not desired
         if "None" in self.tail_behavior or self.imputation_method in [
-            "bffill",
+            "bfill",
             "ffill",
         ]:
             all_na_times = df.isna().all(axis=1).groupby(self.time_index).all()
