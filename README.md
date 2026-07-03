@@ -134,6 +134,11 @@ For more examples, see the jupyter notebook.
 
 ## Changelog:
 
+### 0.8.4
+
+Bugfixes:
+- KNNImputer now always uses keep_empty_features=True to prevent index mismatches during the all-NA location fill step, which caused the imputation to fail in some cases when using the KNN method.
+
 ### 0.8.3
 
 Improvements:

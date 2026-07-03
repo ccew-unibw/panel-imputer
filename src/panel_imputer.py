@@ -164,8 +164,11 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             # nan_interp_policy
         assert nan_loc_policy in [None, "mean", "median", "knnimpute"]
         self.nan_loc_policy = nan_loc_policy
-        if nan_loc_policy == "knnimpute" and knn_kwargs is None:
-            knn_kwargs = {"weights": "distance"}
+        if nan_loc_policy == "knnimpute":
+            if knn_kwargs is None:
+                knn_kwargs = {"weights": "distance"}
+            # during KNN imputation step, empty features need to be kept for the indices to align
+            knn_kwargs = {**knn_kwargs, **{"keep_empty_features": True}}        
         self.knn_kwargs = knn_kwargs
         self.knn_performance = knn_performance
         self.interp_method = interp_method
