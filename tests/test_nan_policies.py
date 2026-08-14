@@ -135,3 +135,75 @@ def test_nan_loc_policy_respects_all_nan_times():
     b_vals = out.xs("B", level="loc")["v"].values
     assert np.isnan(b_vals[0])
 
+
+def test_nan_loc_policy_respects_tail_behavior():
+    """Ensure nan_loc_policy does not fill tails in ffill/bfill or in conflict with tail_behavior."""
+    idx = pd.MultiIndex.from_product([["A", "B", "Target"], [0, 1, 2, 3]], names=["loc", "time"])
+    base = [np.nan, 1.0, 2.0, np.nan]
+    df = pd.DataFrame(index=idx, data={"v": base + base + [np.nan] * 4})
+
+    # ffill leaves the leading all-NA time NaN; only times 1-3 are filled.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="ffill", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [np.nan, 1.0, 2.0, 2.0], equal_nan=True,
+    )
+
+    # bfill leaves the trailing all-NA time NaN; only times 0-2 are filled.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="bfill", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [1.0, 1.0, 2.0, np.nan], equal_nan=True,
+    )
+
+    # fill_all fills both tails, so no all-NA time survives and every time is filled.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="fill_all", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [1.0, 1.0, 2.0, 2.0], equal_nan=True,
+    )
+
+    # interpolate with tail_behavior="None" leaves both tail all-NA times NaN; only times 1-2 are filled.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="interpolate", interp_method="linear",
+        tail_behavior="None", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [np.nan, 1.0, 2.0, np.nan], equal_nan=True,
+    )
+
+    # interpolate with tail_behavior="fill" fills both tails, so every time is filled.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="interpolate", interp_method="linear",
+        tail_behavior="fill", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [1.0, 1.0, 2.0, 2.0], equal_nan=True,
+    )
+
+    # List-form tail_behavior=["None", "fill"] drops only the "None" side (time 0); the
+    # "fill" side keeps time 3 filled. Guards the "in" membership check that supports both
+    # string and list tail_behavior.
+    out = PanelImputer(
+        location_index="loc", time_index="time",
+        imputation_method="interpolate", interp_method="linear",
+        tail_behavior=["None", "fill"], nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert np.array_equal(
+        out.xs("Target", level="loc")["v"].values,
+        [np.nan, 1.0, 2.0, 2.0], equal_nan=True,
+    )
+

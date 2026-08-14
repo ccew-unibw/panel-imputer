@@ -201,24 +201,47 @@ def test_index_order_preserved_after_transform():
     assert out.index.names == df.index.names
 
 
-def test_index_stability():
-    """Ensure multi-level time indexes fill correctly, with unsorted index and 
-    index levels, and the orginal index is preserved in the output."""
-    locs = ["A", "B"]
-    months = [1, 2, 3]
+def test_multilevel_time_index():
+    """Multi-level time indexes fill correctly and preserve the original index.
+
+    The package reorders index levels for imputation and restores the original order on
+    output; with a multi-level ``time_index`` this reordering is non-trivial. The Target
+    location is entirely missing, so the ``nan_loc_policy`` block also exercises the
+    all-NA location fill under a multi-level time index. bfill/ffill/fill_all are thin
+    pandas wrappers and are covered by the single-level tests; here we cover the two
+    paths that carry package-specific logic: interpolate (which resets to a positional
+    x-axis) and the cross-sectional all-NA location fill.
+    """
+    locs = ["A", "B", "Target"]
+    months = [1, 2]
     years = [2021, 2022]
     idx = pd.MultiIndex.from_product([locs, months, years], names=["loc", "month", "year"])
-    df = pd.DataFrame(index=idx, data={
-        "v": [1.0, 5.0, np.nan, np.nan, np.nan, np.nan] * 2
-    })
-    df = df.sample(frac=1.0)
+    df = pd.DataFrame(index=idx, columns=["v"], dtype=float)
+    df.loc[("A", 1, 2021), "v"] = 1.0
+    df.loc[("A", 2, 2022), "v"] = 4.0
+    df.loc[("B", 2, 2021), "v"] = 2.0
+    df.loc[("B", 1, 2022), "v"] = 3.0
+    df = df.sample(frac=1.0, random_state=0)
 
-    imp = PanelImputer(location_index="loc", time_index=["year", "month"], imputation_method="ffill")
-    out = imp.fit_transform(df)
-
+    # interpolate with tail_behavior="fill": linear interpolation across the (year, month) order.
+    out = PanelImputer(
+        location_index="loc", time_index=["year", "month"],
+        imputation_method="interpolate", interp_method="linear", tail_behavior="fill",
+    ).fit_transform(df)
     assert out.index.equals(df.index)
-    a_2021 = out.xs(("A", 2021), level=("loc", "year"))["v"].values
-    assert np.array_equal(a_2021, [1.0, 1.0, 1.0], equal_nan=True)
+    assert np.array_equal(out.xs(("A", 2021), level=("loc", "year"))["v"].values, [1.0, 2.0], equal_nan=True)
+    assert np.array_equal(out.xs(("A", 2022), level=("loc", "year"))["v"].values, [3.0, 4.0], equal_nan=True)
+    assert np.array_equal(out.xs(("B", 2021), level=("loc", "year"))["v"].values, [2.0, 2.0], equal_nan=True)
+    assert np.array_equal(out.xs(("B", 2022), level=("loc", "year"))["v"].values, [3.0, 3.0], equal_nan=True)
+
+    # fill_all with nan_loc_policy="mean": Target is filled from per-(year, month) cross-sectional means.
+    out = PanelImputer(
+        location_index="loc", time_index=["year", "month"],
+        imputation_method="fill_all", nan_loc_policy="mean",
+    ).fit_transform(df)
+    assert out.index.equals(df.index)
+    assert np.array_equal(out.xs(("Target", 2021), level=("loc", "year"))["v"].values, [1.5, 3.0], equal_nan=True)
+    assert np.array_equal(out.xs(("Target", 2022), level=("loc", "year"))["v"].values, [3.5, 3.5], equal_nan=True)
 
 
 def test_missing_values_parameter_replacement():
