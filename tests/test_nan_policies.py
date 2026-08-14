@@ -36,7 +36,7 @@ def test_all_nan_policy_drop_column():
 
 
 def test_nan_loc_policy_mean():
-    """Ensure nan_loc_policy='mean' fills entire missing location from cross-sectional means."""
+    """Ensure nan_loc_policy='mean' fills entire missing location from cross-sectional means. """
     locs, times = ["A", "B", "C", "Target"], [0, 1, 2]
     idx = pd.MultiIndex.from_product([locs, times], names=["loc", "time"])
     df = pd.DataFrame(
@@ -54,6 +54,9 @@ def test_nan_loc_policy_mean():
     imp = PanelImputer(
         location_index="loc",
         time_index="time",
+        imputation_method="interpolate",
+        interp_method="linear",
+        tail_behavior="fill",
         nan_loc_policy="mean",
     )
     out = imp.fit_transform(df)
@@ -81,6 +84,9 @@ def test_nan_loc_policy_median():
     imp = PanelImputer(
         location_index="loc",
         time_index="time",
+        imputation_method="interpolate",
+        interp_method="linear",
+        tail_behavior="fill",
         nan_loc_policy="median",
     )
     out = imp.fit_transform(df)

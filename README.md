@@ -134,6 +134,11 @@ For more examples, see the jupyter notebook.
 
 ## Changelog:
 
+### 0.8.6
+
+Bugfix:
+- Fixed a bug with `interpolate` in combination with `nan_loc_policy` leaving all-NA locations unfilled. `nan_loc_policy` is now performed in a second imputation pass on the updated dataframe after the first pass.
+
 ### 0.8.5
 
 Improvements:

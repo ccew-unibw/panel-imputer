@@ -238,8 +238,13 @@ class PanelImputer(BaseEstimator, TransformerMixin):
         check_is_fitted(self, "fit_checks_done_")
         original_index = X.index
         df = self._validate_input(X, in_fit=False)
-        update_map = self._get_update_map(df)
-        df.update(update_map, overwrite=False)
+        # first pass: local imputation where possible
+        update_map_locs = self._get_update_map(df)
+        df.update(update_map_locs, overwrite=False)
+        # second pass: all-NA imputation (skipped if the first pass filled everything)
+        if self.nan_loc_policy is not None and df.isna().any().any():
+            update_map_na = self._fill_nan_locs(df)
+            df.update(update_map_na, overwrite=False)
         # level order may be modified during input validation
         df = df.reorder_levels(original_index.names).loc[original_index]
         return df
@@ -406,9 +411,6 @@ class PanelImputer(BaseEstimator, TransformerMixin):
                 update_map = pd.concat(update_maps)
         else:
             update_map = self._locs_interpolate(df, progress_bar=self.verbose > 0)
-        if self.nan_loc_policy is not None:
-            fill_df = self._fill_nan_locs(update_map)
-            update_map.update(fill_df, overwrite=False)
         return update_map.sort_index()
 
     def _locs_interpolate(
