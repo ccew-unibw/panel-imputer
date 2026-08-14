@@ -134,6 +134,14 @@ For more examples, see the jupyter notebook.
 
 ## Changelog:
 
+### 0.8.5
+
+Improvements:
+- Vectorized the all-NA location fill step for the `mean` and `median` policies. Significantly faster on panels with many locations.
+
+Bugfixes:
+- Fixed a `KeyError` in the the all-NA location fill step that occurred with a multi-level time index and `nan_loc_policy` != `None`. 
+
 ### 0.8.4
 
 Bugfixes:

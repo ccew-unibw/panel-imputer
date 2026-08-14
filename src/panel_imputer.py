@@ -616,58 +616,22 @@ class PanelImputer(BaseEstimator, TransformerMixin):
             A DataFrame with imputed values for the previously all-NaN locations.
         """
 
-        def impute_nan_loc(loc) -> pd.DataFrame:
-            df_loc = df.xs(loc, level=self.location_index, drop_level=False)
-            cols = df_loc.columns[df_loc.isna().any()].tolist()
-            if len(cols) == 0:
-                return None
-            else:
-                loc_map = pd.DataFrame(index=df_loc.index)
-                for col in cols:
-                    if self.nan_loc_policy == "mean":
-                        try:
-                            loc_map[col] = lookup_df_time.loc[
-                                df_loc.reset_index()[self.time_index], (col, "mean")
-                            ].to_list()
-                        except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("mean", col)]
-                    elif self.nan_loc_policy == "median":
-                        try:
-                            loc_map[col] = lookup_df_time.loc[
-                                df_loc.reset_index()[self.time_index], (col, "median")
-                            ].to_list()
-                        except KeyError:
-                            loc_map[col] = lookup_df_all.loc[("median", col)]
-                    else:
-                        raise NotImplementedError
-                return loc_map
-
         # do not apply the NA location filling to all-NA times in already imputed/interpolated locs
         # the assumption is that these are not supposed to be filled in case of "None" tail_behavior
         # or the bfill/ffill filling strategy, where filling beyond the first/last available date is
         # not desired
-        if "None" in self.tail_behavior or self.imputation_method in [
-            "bfill",
-            "ffill",
-        ]:
-            all_na_times = df.isna().all(axis=1).groupby(self.time_index).all()
-            all_na_filter = df.reset_index().apply(
-                lambda x: all_na_times.loc[x[self.time_index]], axis=1
-            )
-            # drop from the dataframe
-            df = df.loc[(~all_na_filter).to_list()]
+        if "None" in self.tail_behavior or self.imputation_method in ["bfill", "ffill"]:
+            all_na_time_per_row = df.isna().all(axis=1).groupby(self.time_index).transform("all")
+            df = df.loc[~all_na_time_per_row]
 
         if self.nan_loc_policy in ["mean", "median"]:
-            locs = df.index.get_level_values(self.location_index).unique()
-            # creating a lookup df to do the mean/median based on the point in time if possible
-            lookup_df_time = (
-                df.groupby(self.time_index).agg(["mean", "median"]).dropna(how="all")
-            )
-            # fallback option in case of unequal time series in the panel
-            lookup_df_all = df.agg(["mean", "median"]).dropna(how="all")
-            update_dfs = [impute_nan_loc(loc) for loc in locs]
-            update_df = pd.concat(
-                [df_loc for df_loc in update_dfs if df_loc is not None]
+            # cross-sectional stat per time point, broadcast to every row; falls back to the
+            # global per-column stat for time points that are entirely NaN after the filter
+            update_df = (
+                df.groupby(self.time_index)
+                .transform(self.nan_loc_policy)
+                .fillna(df.agg(self.nan_loc_policy))
+                .where(df.isna())
             )
         elif self.nan_loc_policy == "knnimpute":
             if self.verbose > 0:
